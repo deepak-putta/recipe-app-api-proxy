@@ -1,12 +1,49 @@
-# You can override the included template(s) by including variable overrides
-# SAST customization: https://docs.gitlab.com/ee/user/application_security/sast/#customizing-the-sast-settings
-# Secret Detection customization: https://docs.gitlab.com/ee/user/application_security/secret_detection/#customizing-settings
-# Dependency Scanning customization: https://docs.gitlab.com/ee/user/application_security/dependency_scanning/#customizing-the-dependency-scanning-settings
-# Note that environment variables can be set in several places
-# See https://docs.gitlab.com/ee/ci/variables/#cicd-variable-precedence
+#GitLab CI uses base images to run pipelines that we define in this file, different from appl image which is for build and deplyment
+
+# proxy deployment
+
+image: docker:19.03.5
+services:
+  - docker:19.03.5-dind
+
 stages:
-- test
-sast:
-  stage: test
-include:
-- template: Security/SAST.gitlab-ci.yml
+  - Build
+  - Push
+
+before_script:
+    - apk add python3                                    #install py3 on build image needs for awscli
+    - pip3 install awscli==1.18.8                      
+    - docker load --input data/image.tar        
+    - $(aws ecr get-login --no-include-email  --region us-east-1)  #ecr creates temp login
+
+Build:                                            # define name of our first job
+  stage: Build                                    # define build stage, set build to build stage
+  before_script: []                               # doesn't run the script
+  script:                                         # actual script used to run our job
+    - mkdir data/                         
+    - docker build --compress -t proxy .         # use our dockerfile to build our project image 
+    - docker save --output data/image.tar proxy  # save image to disk on our build job
+  artifacts:
+    name: image
+    paths:
+      - data/ 
+
+Push Dev:
+  stage: Push
+  script: 
+    - docker tag proxy:latest $ECR_REPO:dev                       # tag proxy to tag dev
+    - docker push $ECR_REPO:dev                                    #push repo to ECR
+  rules:
+    - if: "$CI_COMMIT_BRANCH == 'main'"          #run this job only when commit is main  
+
+Push Release:
+  stage: Push
+  script:
+    - export TAGGED_ECR_REPO=$ECR_REPO:$(echo $CI_COMMIT_TAG | sed 's/-release//')  #ver no specifed in tag
+    - docker tag proxy:latest $TAGGED_ECR_REPO  # 1.0 in the end
+    - docker push $TAGGED_ECR_REPO
+    - docker tag $TAGGED_ECR_REPO $ECR_REPO:latest     #others can choose latest than 1.0
+    - docker push $ECR_REPO:latest
+  rules:
+    - if: "$CI_COMMIT_TAG =~ /^*-release$/"
+
